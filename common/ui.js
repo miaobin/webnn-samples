@@ -72,7 +72,6 @@ export async function showProgressComponent(pm, pb, pi) {
   $('#progressstep').html(p);
   $('.shoulddisplay').hide();
   $('.icdisplay').hide();
-  $('#gallery .gallery-image').off('click');
   await new Promise((res) => setTimeout(res, 100));
 }
 
@@ -80,4 +79,49 @@ export function readyShowResultComponents() {
   $('#progressmodel').hide();
   $('.icdisplay').show();
   $('.shoulddisplay').show();
+}
+
+// Handle buttons click
+// Use to disable buttons click during model running and resume them once
+// model running done
+export function handleClick(cssSelectors, disabled = true) {
+  /* eslint no-unused-vars: ["error", { "varsIgnorePattern": "selector" }] */
+  for (const selector of cssSelectors) {
+    if (disabled) {
+      $(selector).addClass('clickDisabled');
+      if (selector.startsWith('.btn')) $(selector).addClass('styleDisabled');
+    } else {
+      $(selector).removeClass('clickDisabled');
+      if (selector.startsWith('.btn')) $(selector).removeClass('styleDisabled');
+    }
+  }
+}
+
+/**
+ * Show flexible alert messages
+ * @param {String} msg, alert message.
+ * @param {String} type, one of ["info", "warning"], type of message,
+ * default is 'warning'
+ */
+export function addAlert(msg, type = 'warning') {
+  let alertClass = 'alert-warning';
+  if (type === 'info') {
+    alertClass = 'alert-info';
+    if ($('.alert-info').length) {
+      $('.alert-info > span').html(msg);
+      return;
+    }
+  }
+
+  $('<div>', {
+    'class': `alert ${alertClass} alert-dismissible fade show mt-3`,
+    'role': 'alert',
+    'html': `<span>${msg}</span>`,
+  }).append($('<button>', {
+    'type': 'button',
+    'class': 'close',
+    'data-dismiss': 'alert',
+    'aria-label': 'close',
+    'html': '<span aria-hidden="true">&times;</span>',
+  })).insertBefore($('#container').children()[0]);
 }

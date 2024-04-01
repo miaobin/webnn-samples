@@ -4,38 +4,79 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
   <title>WebNN Semantic Segmentation Example</title>
-  <link href='../common/css/style.css' rel='stylesheet'>
   <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css"
     integrity="sha384-JcKb8q3iqJ61gNV9KGb8thSsNjpSL0n8PARn9HuZOnIxN0hoP+VmmDGMN5t9UJ0Z" crossorigin="anonymous">
+  <link href='../common/css/style.css' rel='stylesheet'>
+  <link rel="icon" type="image/x-icon" href="../common/img/favicon/favicon.ico">
+  <link rel="apple-touch-icon" sizes="180x180" href="../common/img/favicon/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="../common/img/favicon/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="../common/img/favicon/favicon-16x16.png">
+  <link rel="manifest" href="../common/img/favicon/site.webmanifest">
 </head>
 
 <body>
-  <nav class='navbar navbar-expand-md navbar-dark bg-dark' style='width:100%'>
-    <span class='navbar-brand mb-0 h1'>WebNN Semantic Segmentation Example</span>
+  <nav class="navbar navbar-expand-md navbar-dark">
+    <a href="../index.html">
+      <div class="logosvg" id="logosvg"></div>
+    </a>
+    <span class="navbar-brand">Semantic Segmentation</span>
+    <ul class="navbar-nav"></ul>
   </nav>
   <div class='container' id='container'>
-    <div class="row align-items-start mb-3 mt-3">
-      <div class="col">
-        <div class="btn-group-toggle" data-toggle="buttons" id="layoutBtns">
-          <label class="mr-3">Layout: </label>
-          <label class="btn btn-outline-info btn-sm mr-2 active">
-            <input type="radio" name="layout" id="nchw" autocomplete="off" checked>NCHW
-          </label>
-          <label class="btn btn-outline-info btn-sm">
-            <input type="radio" name="layout" id="nhwc" autocomplete="off">NHWC
-          </label>
+    <div class="card mt-2 mb-2">
+      <div class="card-body">
+        <div class="row mb-2 align-items-center justify-content-md-left">
+          <div class="col-1 col-md-1">
+            <span>Backend</span>
+          </div>
+          <div class="col-md-auto">
+            <div class="btn-group-toggle" data-toggle="buttons" id="backendBtns">
+              <label class="btn btn-outline-info custom" name="polyfill">
+                <input type="radio" name="backend" id="polyfill_cpu" autocomplete="off">Wasm (CPU)
+              </label>
+              <label class="btn btn-outline-info custom" name="polyfill">
+                <input type="radio" name="backend" id="polyfill_gpu" autocomplete="off">WebGL (GPU)
+              </label>
+              <label class="btn btn-outline-info custom" name="webnn">
+                <input type="radio" name="backend" id="webnn_cpu" autocomplete="off">WebNN (CPU)
+              </label>
+              <label class="btn btn-outline-info custom" name="webnn">
+                <input type="radio" name="backend" id="webnn_gpu" autocomplete="off">WebNN (GPU)
+              </label>
+            </div>
+          </div>
         </div>
-      </div>
-      <div class ="col-8">
-        <div class="btn-group-toggle" data-toggle="buttons" id="modelBtns">
-          <label class="mr-3">Model: </label>
-          <label class="btn btn-outline-info btn-sm mr-2 active">
-            <input type="radio" name="model" id="deeplabv3mobilenetv2" autocomplete="off" checked>DeepLab V3 MobileNet V2
-          </label>
+        <!-- <div class="row mb-2 align-items-center">
+          <div class="col-1 col-md-1">
+            <span>Layout</span>
+          </div>
+          <div class="col-md-auto">
+            <div class="btn-group-toggle" data-toggle="buttons" id="layoutBtns">
+              <label class="btn btn-outline-info btn-sm">
+                <input type="radio" name="layout" id="nchw" autocomplete="off">NCHW
+              </label>
+              <label class="btn btn-outline-info btn-sm active">
+                <input type="radio" name="layout" id="nhwc" autocomplete="off" checked>NHWC
+              </label>
+            </div>
+          </div>
+        </div> -->
+        <div class="row mb-2 align-items-center">
+          <div class="col-1 col-md-1">
+            <span>Model</span>
+          </div>
+          <div class="col-md-auto">
+            <div class="btn-group-toggle" data-toggle="buttons" id="modelBtns">
+              <label class="btn btn-outline-info btn-sm active">
+                <input type="radio" name="model" id="deeplabv3mnv2" autocomplete="off">DeepLab V3 MobileNet
+                V2
+              </label>
+            </div>
+          </div>
         </div>
       </div>
     </div>
-    <ul class='nav nav-tabs nav-justified mb-3' id='ex1' role='tablist'>
+    <ul class='nav nav-tabs nav-justified mb-3' id='tabs' role='tablist'>
       <li class='nav-item' id='img' role='presentation'>
         <a class='nav-link active' data-toggle='tab' href='#imagetab' role='tab' aria-controls='ex3-tabs-1'
           aria-selected='true'>IMAGE</a>
@@ -63,15 +104,20 @@
         </div>
       </div>
     </div>
+    <div class='tab-content text-center mt-5 col-sm' id='hint'>
+      <h2 class="text-uppercase text-info">No model selected</h2>
+      <p class="font-weight-lighter">Please select model to start prediction.</p>
+    </div>
     <div class='tab-content clearfix row' id='semanticsegmentation'>
       <div class='icdisplay col-sm' style='display: none;'>
         <div class='tab-pane text-center active col-sm'>
           <div class='icdisplay'>
             <div class='col-lg-12 col-xs-12 text-center'>
-              <div class='row'>
-                <div class='col bt-3 mb-3' style='display: flex;'>
-                  <canvas id='outputCanvas'></canvas>
-                </div>
+              <div class='col mb-3'>
+                <span id='fps' class="badge badge-pill badge-success"></span>
+              </div>
+              <div class='col bt-3 mb-3' style='display: flex;'>
+                <canvas id='outputCanvas'></canvas>
               </div>
             </div>
           </div>
@@ -156,13 +202,17 @@
     </div>
     <div class='row mt-1 text-center' id='pickimage'>
       <div class='col'>
-        <label class='btn btn-outline-info shoulddisplay' style='display: none;'>
+        <label class='btn btn-outline-info btn-lg shoulddisplay' style='display: none;'>
           <input type='file' id='imageFile' accept='image/*' hidden />
           <span>Pick Image</span>
         </label>
       </div>
     </div>
   </div>
+  <footer class="text-muted text-center text-small mt-5">
+    <div id="badge"></div>
+    <div id="footer"></div>
+  </footer>
   <img id='feedElement' hidden crossorigin='anonymous' src=''>
   <video id='feedMediaElement' autoplay playsinline hidden></video>
   <script>
@@ -183,25 +233,17 @@
     integrity="sha384-B4gt1jrGC7Jh4AgTPSdUtOBvfO8shuf57BaghqFfPlYxofvL8/KUEfYiJOMMV+rV"
     crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@jaames/iro@5"></script>
-  <script src="https://webmachinelearning.github.io/webnn-polyfill/dist/webnn-polyfill.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.13.0/dist/tf.min.js"
+    integrity="sha256-thVOvsS0U8X0/2twH3+6dCK3ZPTvgWgFSivgfpj5vQQ="
+    crossorigin="anonymous"></script>
   <script>
     // To restore module after loading 3rd-party libraries.
     if (window.tempModule) module = window.tempModule;
   </script>
-  <script type="module">
-    import {main} from './main.js';
-    import {setPolyfillBackend} from '../common/utils.js';
-
-    window.onload = async () => {
-      // There's bug when using 'dilations' options with WebGL backend,
-      // see https://github.com/tensorflow/tfjs/issues/5293.
-      // Use 'wasm' as default backend before the bug been fixed.
-      let backend = (new URLSearchParams(location.search)).get('backend');
-      backend = backend === null ? 'wasm' : backend;
-      await setPolyfillBackend(backend);
-      await main();
-    }
-  </script>
+  <script type="module" src="./main.js"></script>
+  <script type="module" src="../common/component/component.js"></script>
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-6TK7JD3KKY"></script>
+  <script src="../common/libs/gtag.js"></script>
 </body>
 
 </html>

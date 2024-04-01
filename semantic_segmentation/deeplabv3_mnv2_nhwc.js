@@ -1,13 +1,16 @@
 'use strict';
 
-import {buildConstantByNpy} from '../common/utils.js';
+import {buildConstantByNpy, computePadding2DForAutoPad, weightsOrigin} from '../common/utils.js';
 
 // DeepLab V3 MobileNet V2 model with 'nhwc' input layout
 export class DeepLabV3MNV2Nhwc {
   constructor() {
+    this.context_ = null;
+    this.deviceType_ = null;
     this.builder_ = null;
     this.graph_ = null;
-    this.weightsUrl_ = '../test-data/models/deeplabv3_mnv2_nhwc/weights/';
+    this.weightsUrl_ = weightsOrigin() +
+      '/test-data/models/deeplabv3_mnv2_nhwc/weights/';
     this.inputOptions = {
       mean: [127.5, 127.5, 127.5],
       std: [127.5, 127.5, 127.5],
@@ -20,7 +23,7 @@ export class DeepLabV3MNV2Nhwc {
   }
 
   async buildConv_(
-      input, namePrefix, dwBiasSuffix = '', relu6 = true, options = undefined) {
+      input, namePrefix, dwBiasSuffix = '', relu6 = true, options = {}) {
     const prefix = this.weightsUrl_ + namePrefix;
     let weightsName = prefix + '.npy';
     let biasName = prefix + '_bn_offset.npy';
@@ -33,35 +36,30 @@ export class DeepLabV3MNV2Nhwc {
     }
     const weights = await buildConstantByNpy(this.builder_, weightsName);
     const bias = await buildConstantByNpy(this.builder_, biasName);
-
-    if (options !== undefined) {
-      options.inputLayout = 'nhwc';
-      options.filterLayout = 'ohwi';
-      options.autoPad = 'same-upper';
-    } else {
-      options = {
-        inputLayout: 'nhwc',
-        filterLayout: 'ohwi',
-        autoPad: 'same-upper',
-      };
-    }
+    options.inputLayout = 'nhwc';
     if (namePrefix.includes('depthwise')) {
       options.filterLayout = 'ihwo';
+    } else {
+      options.filterLayout = 'ohwi';
     }
-
-    const add = this.builder_.add(
-        this.builder_.conv2d(input, weights, options),
-        this.builder_.reshape(bias, [1, 1, 1, -1]));
-
+    options.padding = computePadding2DForAutoPad(
+        /* nhwc */[input.shape()[1], input.shape()[2]],
+        /* ohwi or ihwo */[weights.shape()[1], weights.shape()[2]],
+        options.strides, options.dilations, 'same-upper');
+    options.bias = bias;
     if (relu6) {
-      return this.builder_.clamp(
-          add,
-          {
-            minValue: this.builder_.constant(0.),
-            maxValue: this.builder_.constant(6.0),
-          });
+      // TODO: Set clamp activation to options once it's supported in
+      // WebNN DML backend.
+      // Implement `clip` by `clamp` of  WebNN API
+      if (this.deviceType_ == 'gpu') {
+        return this.builder_.clamp(
+            this.builder_.conv2d(input, weights, options),
+            {minValue: 0, maxValue: 6});
+      } else {
+        options.activation = this.builder_.clamp({minValue: 0, maxValue: 6});
+      }
     }
-    return add;
+    return this.builder_.conv2d(input, weights, options);
   }
 
   async buildLinearBottleneck_(
@@ -84,12 +82,16 @@ export class DeepLabV3MNV2Nhwc {
     return conv1x1Linear;
   }
 
-  async load() {
-    const context = navigator.ml.createContext();
-    this.builder_ = new MLGraphBuilder(context);
+  async load(contextOptions) {
+    this.context_ = await navigator.ml.createContext(contextOptions);
+    this.deviceType_ = contextOptions.deviceType;
+    this.builder_ = new MLGraphBuilder(this.context_);
     const strides = [2, 2];
-    const input = this.builder_.input('input',
-        {type: 'float32', dimensions: this.inputOptions.inputDimensions});
+    const input = this.builder_.input('input', {
+      type: 'float32',
+      dataType: 'float32',
+      dimensions: this.inputOptions.inputDimensions,
+    });
     const conv0 = await this.buildConv_(
         input, 'MobilenetV2_Conv_Conv2D', '', true, {strides});
     const conv1 = await this.buildConv_(
@@ -134,20 +136,20 @@ export class DeepLabV3MNV2Nhwc {
     const averagePool2d = this.builder_.averagePool2d(bottleneck15,
         {windowDimensions: [65, 65], strides: [65, 65], layout: 'nhwc'});
     const conv4 = await this.buildConv_(averagePool2d, 'image_pooling_Conv2D');
-    const resample0 = this.builder_.resample(
-        conv4, {sizes: [1, 65, 65, 256], mode: 'linear'});
+    const resample0 = this.builder_.resample2d(
+        conv4, {sizes: [65, 65], mode: 'linear', axes: [1, 2]});
     const concat = this.builder_.concat([resample0, conv3], 3);
 
     const conv5 = await this.buildConv_(concat, 'concat_projection_Conv2D');
     const conv6 = await this.buildConv_(conv5, 'logits_semantic', '', false);
-    const resample1 = this.builder_.resample(
-        conv6, {sizes: [1, 65, 65, 21], mode: 'linear'});
-    return this.builder_.resample(
-        resample1, {sizes: [1, 513, 513, 21], mode: 'linear'});
+    const resample1 = this.builder_.resample2d(
+        conv6, {sizes: [65, 65], mode: 'linear', axes: [1, 2]});
+    return this.builder_.resample2d(
+        resample1, {sizes: [513, 513], mode: 'linear', axes: [1, 2]});
   }
 
-  build(outputOperand) {
-    this.graph_ = this.builder_.build({'output': outputOperand});
+  async build(outputOperand) {
+    this.graph_ = await this.builder_.build({'output': outputOperand});
   }
 
   // Release the constant tensors of a model
@@ -158,9 +160,10 @@ export class DeepLabV3MNV2Nhwc {
     }
   }
 
-  compute(inputBuffer, outputBuffer) {
+  async compute(inputBuffer, outputBuffer) {
     const inputs = {'input': inputBuffer};
     const outputs = {'output': outputBuffer};
-    this.graph_.compute(inputs, outputs);
+    const results = await this.context_.compute(this.graph_, inputs, outputs);
+    return results;
   }
 }

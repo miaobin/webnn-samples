@@ -2,16 +2,16 @@
 
 import {DeepLabV3MNV2Nchw} from './deeplabv3_mnv2_nchw.js';
 import {DeepLabV3MNV2Nhwc} from './deeplabv3_mnv2_nhwc.js';
-import {showProgressComponent, readyShowResultComponents} from '../common/ui.js';
-import {getInputTensor, getMedianValue, sizeOfShape} from '../common/utils.js';
+import * as ui from '../common/ui.js';
+import * as utils from '../common/utils.js';
 import {Renderer} from './lib/renderer.js';
 
 const imgElement = document.getElementById('feedElement');
 imgElement.src = './images/test.jpg';
 const camElement = document.getElementById('feedMediaElement');
 const outputCanvas = document.getElementById('outputCanvas');
-let modelName ='deeplabv3mnv2';
-let layout = 'nchw';
+let modelName ='';
+let layout = 'nhwc';
 let instanceType = modelName + layout;
 let rafReq;
 let isFirstTimeLoad = true;
@@ -26,35 +26,54 @@ let inputOptions;
 let outputBuffer;
 let renderer;
 let hoverPos = null;
+let deviceType = '';
+let lastdeviceType = '';
+let backend = '';
+let lastBackend = '';
+const disabledSelectors = ['#tabs > li', '.btn'];
 
-$(document).ready(() => {
+$(document).ready(async () => {
   $('.icdisplay').hide();
-  renderer = new Renderer(outputCanvas);
-  renderer.setup();
+  if (await utils.isWebNN()) {
+    $('#webnn_cpu').click();
+  } else {
+    $('#polyfill_cpu').click();
+  }
 });
 
 $(window).on('load', () => {
+  renderer = new Renderer(outputCanvas);
+  renderer.setup();
   loadRenderUI();
+});
+
+$('#backendBtns .btn').on('change', async (e) => {
+  if (inputType === 'camera') utils.stopCameraStream(rafReq, stream);
+  if ($(e.target).attr('id').indexOf('cpu') != -1) {
+    layout = 'nhwc';
+  } else if (($(e.target).attr('id').indexOf('gpu') != -1)) {
+    layout = 'nchw';
+  } else {
+    throw new Error('Unknown backend');
+  }
+  await main();
 });
 
 $('#modelBtns .btn').on('change', async (e) => {
   modelName = $(e.target).attr('id');
-  if (inputType === 'camera') cancelAnimationFrame(rafReq);
+  if (inputType === 'camera') utils.stopCameraStream(rafReq, stream);
   await main();
 });
 
-$('#layoutBtns .btn').on('change', async (e) => {
-  layout = $(e.target).attr('id');
-  if (inputType === 'camera') cancelAnimationFrame(rafReq);
-  await main();
-});
+// $('#layoutBtns .btn').on('change', async (e) => {
+//   layout = $(e.target).attr('id');
+//   if (inputType === 'camera') utils.stopCameraStream(rafReq, stream);
+//   await main();
+// });
 
 // Click trigger to do inference with <img> element
 $('#img').click(async () => {
-  if (inputType === 'camera') cancelAnimationFrame(rafReq);
-  if (stream !== null) {
-    stopCamera();
-  }
+  if (inputType === 'camera') utils.stopCameraStream(rafReq, stream);
   inputType = 'image';
   $('#pickimage').show();
   $('.shoulddisplay').hide();
@@ -199,53 +218,47 @@ async function fetchLabels(url) {
   return data.split('\n');
 }
 
-async function getMediaStream() {
-  // Support 'user' facing mode at present
-  const constraints = {audio: false, video: {facingMode: 'user'}};
-  stream = await navigator.mediaDevices.getUserMedia(constraints);
-}
-
-function stopCamera() {
-  stream.getTracks().forEach((track) => {
-    if (track.readyState === 'live' && track.kind === 'video') {
-      track.stop();
-    }
-  });
-}
-
 /**
  * This method is used to render live camera tab.
  */
 async function renderCamStream() {
-  const inputBuffer = getInputTensor(camElement, inputOptions);
+  if (!stream.active) return;
+  // If the video element's readyState is 0, the video's width and height are 0.
+  // So check the readState here to make sure it is greater than 0.
+  if (camElement.readyState === 0) {
+    rafReq = requestAnimationFrame(renderCamStream);
+    return;
+  }
+  const inputBuffer = utils.getInputTensor(camElement, inputOptions);
+  const inputCanvas = utils.getVideoFrame(camElement);
   console.log('- Computing... ');
   const start = performance.now();
-  netInstance.compute(inputBuffer, outputBuffer);
+  const results = await netInstance.compute(inputBuffer, outputBuffer);
   computeTime = (performance.now() - start).toFixed(2);
   console.log(`  done in ${computeTime} ms.`);
+  outputBuffer = results.outputs.output;
   showPerfResult();
-  await drawOutput(camElement);
+  await drawOutput(inputCanvas);
+  $('#fps').text(`${(1000/computeTime).toFixed(0)} FPS`);
   rafReq = requestAnimationFrame(renderCamStream);
 }
 
 async function drawOutput(srcElement) {
   // TODO: move 'argMax' operation to graph once it is supported in WebNN spec.
   // https://github.com/webmachinelearning/webnn/issues/184
-  const tf = navigator.ml.createContext().tf;
-  const a = tf.tensor(outputBuffer, netInstance.outputDimensions, 'float32');
-  let axis = 3;
-  if (layout === 'nchw') {
-    axis = 1;
-  }
-  const b = tf.argMax(a, axis);
-  const buffer = await b.buffer();
-  tf.dispose();
-  const argMaxBuffer = buffer.values;
-  const outputShape = b.shape;
+  const [argMaxBuffer, outputShape] = tf.tidy(() => {
+    const a = tf.tensor(outputBuffer, netInstance.outputDimensions, 'float32');
+    let axis = 3;
+    if (layout === 'nchw') {
+      axis = 1;
+    }
+    const b = tf.argMax(a, axis);
+    return [b.dataSync(), b.shape];
+  });
 
   const width = inputOptions.inputDimensions[2];
-  const imWidth = srcElement.naturalWidth | srcElement.videoWidth;
-  const imHeight = srcElement.naturalHeight | srcElement.videoHeight;
+  const imWidth = srcElement.naturalWidth | srcElement.width;
+  const imHeight = srcElement.naturalHeight | srcElement.height;
   const resizeRatio = Math.max(Math.max(imWidth, imHeight) / width, 1);
   const scaledWidth = Math.floor(imWidth / resizeRatio);
   const scaledHeight = Math.floor(imHeight / resizeRatio);
@@ -282,31 +295,27 @@ function constructNetObject(type) {
   return netObject[type];
 }
 
-function addWarning(msg) {
-  const div = document.createElement('div');
-  div.setAttribute('class', 'alert alert-warning alert-dismissible fade show');
-  div.setAttribute('role', 'alert');
-  div.innerHTML = msg;
-  const container = document.getElementById('container');
-  container.insertBefore(div, container.childNodes[0]);
-}
-
 export async function main() {
   try {
+    if (modelName === '') return;
+    [backend, deviceType] =
+        $('input[name="backend"]:checked').attr('id').split('_');
+    ui.handleClick(disabledSelectors, true);
+    if (isFirstTimeLoad) $('#hint').hide();
     let start;
-    // Set 'numRuns' param to run inference multiple times
-    const params = new URLSearchParams(location.search);
-    let numRuns = params.get('numRuns');
-    numRuns = numRuns === null ? 1 : parseInt(numRuns);
+    const [numRuns, powerPreference, numThreads] = utils.getUrlParams();
 
-    if (numRuns < 1) {
-      addWarning('The value of param numRuns must be greater than or equal' +
-          ' to 1.');
-      return;
-    }
-    // Only do load() and build() when model first time loads and
-    // there's new model choosed
-    if (isFirstTimeLoad || instanceType !== modelName + layout) {
+    // Only do load() and build() when model first time loads,
+    // there's new model choosed, backend changed or device changed
+    if (isFirstTimeLoad || instanceType !== modelName + layout ||
+        lastdeviceType != deviceType || lastBackend != backend) {
+      if (lastdeviceType != deviceType || lastBackend != backend) {
+        // Set backend and device
+        await utils.setBackend(backend, deviceType);
+        lastdeviceType = lastdeviceType != deviceType ?
+                              deviceType : lastdeviceType;
+        lastBackend = lastBackend != backend ? backend : lastBackend;
+      }
       if (netInstance !== null) {
         // Call dispose() to and avoid memory leak
         netInstance.dispose();
@@ -316,63 +325,75 @@ export async function main() {
       inputOptions = netInstance.inputOptions;
       labels = await fetchLabels(inputOptions.labelUrl);
       outputBuffer =
-          new Float32Array(sizeOfShape(netInstance.outputDimensions));
+          new Float32Array(utils.sizeOfShape(netInstance.outputDimensions));
       isFirstTimeLoad = false;
       console.log(`- Model name: ${modelName}, Model layout: ${layout} -`);
       // UI shows model loading progress
-      await showProgressComponent('current', 'pending', 'pending');
+      await ui.showProgressComponent('current', 'pending', 'pending');
       console.log('- Loading weights... ');
+      const contextOptions = {deviceType};
+      if (powerPreference) {
+        contextOptions['powerPreference'] = powerPreference;
+      }
+      if (numThreads) {
+        contextOptions['numThreads'] = numThreads;
+      }
       start = performance.now();
-      const outputOperand = await netInstance.load();
+      const outputOperand = await netInstance.load(contextOptions);
       loadTime = (performance.now() - start).toFixed(2);
       console.log(`  done in ${loadTime} ms.`);
       // UI shows model building progress
-      await showProgressComponent('done', 'current', 'pending');
+      await ui.showProgressComponent('done', 'current', 'pending');
       console.log('- Building... ');
       start = performance.now();
-      netInstance.build(outputOperand);
+      await netInstance.build(outputOperand);
       buildTime = (performance.now() - start).toFixed(2);
       console.log(`  done in ${buildTime} ms.`);
     }
     // UI shows inferencing progress
-    await showProgressComponent('done', 'done', 'current');
+    await ui.showProgressComponent('done', 'done', 'current');
     if (inputType === 'image') {
-      const inputBuffer = getInputTensor(imgElement, inputOptions);
+      const inputBuffer = utils.getInputTensor(imgElement, inputOptions);
       console.log('- Computing... ');
       const computeTimeArray = [];
       let medianComputeTime;
-      if (numRuns > 1) {
-        // Do warm up
-        netInstance.compute(inputBuffer, outputBuffer);
-      }
+
+      // Do warm up
+      let results = await netInstance.compute(inputBuffer, outputBuffer);
+
       for (let i = 0; i < numRuns; i++) {
         start = performance.now();
-        netInstance.compute(inputBuffer, outputBuffer);
+        results = await netInstance.compute(
+            results.inputs.input, results.outputs.output);
         computeTime = (performance.now() - start).toFixed(2);
         console.log(`  compute time ${i+1}: ${computeTime} ms`);
         computeTimeArray.push(Number(computeTime));
       }
       if (numRuns > 1) {
-        medianComputeTime = getMedianValue(computeTimeArray);
+        medianComputeTime = utils.getMedianValue(computeTimeArray);
         medianComputeTime = medianComputeTime.toFixed(2);
         console.log(`  median compute time: ${medianComputeTime} ms`);
       }
+      outputBuffer = results.outputs.output;
       console.log('output: ', outputBuffer);
-      await showProgressComponent('done', 'done', 'done');
-      readyShowResultComponents();
+      await ui.showProgressComponent('done', 'done', 'done');
+      $('#fps').hide();
+      ui.readyShowResultComponents();
       await drawOutput(imgElement);
       showPerfResult(medianComputeTime);
     } else if (inputType === 'camera') {
-      await getMediaStream();
+      stream = await utils.getMediaStream();
       camElement.srcObject = stream;
-      camElement.onloadedmediadata = await renderCamStream();
-      await showProgressComponent('done', 'done', 'done');
-      readyShowResultComponents();
+      camElement.onloadeddata = await renderCamStream();
+      await ui.showProgressComponent('done', 'done', 'done');
+      $('#fps').show();
+      ui.readyShowResultComponents();
     } else {
       throw Error(`Unknown inputType ${inputType}`);
     }
   } catch (error) {
     console.log(error);
-    addWarning(error.message);
+    ui.addAlert(error.message);
   }
+  ui.handleClick(disabledSelectors, false);
 }
