@@ -51,15 +51,13 @@ export class ResNet50V2Nchw {
     const mean = buildConstantByNpy(this.builder_, meanName);
     const variance = buildConstantByNpy(this.builder_, varName);
     const options = {scale: await scale, bias: await bias};
-    if (relu) {
-      options.activation = this.builder_.relu();
-    }
-    return this.builder_.batchNormalization(
+    const batchnorm = this.builder_.batchNormalization(
         await input,
         await mean,
         await variance,
         options,
     );
+    return relu ? this.builder_.relu(batchnorm) : batchnorm;
   }
 
   async buildGemm_(input, name) {
@@ -101,7 +99,6 @@ export class ResNet50V2Nchw {
     this.context_ = await navigator.ml.createContext(contextOptions);
     this.builder_ = new MLGraphBuilder(this.context_);
     const data = this.builder_.input('input', {
-      type: 'float32',
       dataType: 'float32',
       dimensions: this.inputOptions.inputDimensions,
     });
@@ -160,7 +157,7 @@ export class ResNet50V2Nchw {
   }
 
   async build(outputOperand) {
-    this.graph_ = this.builder_.build({'output': outputOperand});
+    this.graph_ = await this.builder_.build({'output': outputOperand});
   }
 
   // Release the constant tensors of a model

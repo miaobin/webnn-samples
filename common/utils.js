@@ -34,7 +34,57 @@ export async function getBufferFromUrl(url) {
   return arrayBuffer;
 }
 
-export async function buildConstantByNpy(builder, url) {
+// ref: http://stackoverflow.com/questions/32633585/how-do-you-convert-to-half-floats-in-javascript
+export const toHalf = (function() {
+  const floatView = new Float32Array(1);
+  const int32View = new Int32Array(floatView.buffer);
+
+  /* This method is faster than the OpenEXR implementation (very often
+   * used, eg. in Ogre), with the additional benefit of rounding, inspired
+   * by James Tursa?s half-precision code. */
+  return function toHalf(val) {
+    floatView[0] = val;
+    const x = int32View[0];
+
+    let bits = (x >> 16) & 0x8000; /* Get the sign */
+    let m = (x >> 12) & 0x07ff; /* Keep one extra bit for rounding */
+    const e = (x >> 23) & 0xff; /* Using int is faster here */
+
+    /* If zero, or denormal, or exponent underflows too much for a denormal
+     * half, return signed zero. */
+    if (e < 103) {
+      return bits;
+    }
+
+    /* If NaN, return NaN. If Inf or exponent overflow, return Inf. */
+    if (e > 142) {
+      bits |= 0x7c00;
+      /* If exponent was 0xff and one mantissa bit was set, it means NaN,
+       * not Inf, so make sure we set one mantissa bit too. */
+      bits |= ((e == 255) ? 0 : 1) && (x & 0x007fffff);
+      return bits;
+    }
+
+    /* If exponent underflows but not too much, return a denormal */
+    if (e < 113) {
+      m |= 0x0800;
+      /* Extra rounding may overflow and set mantissa to 0 and exponent
+       * to 1, which is OK. */
+      bits |= (m >> (114 - e)) + ((m >> (113 - e)) & 1);
+      return bits;
+    }
+
+    bits |= ((e - 112) << 10) | (m >> 1);
+    /* Extra rounding. An overflow will set mantissa to 0 and increment
+     * the exponent, which is OK. */
+    bits += m & 1;
+    return bits;
+  };
+})();
+
+// Convert npy data in original data type to `targetType`, only support
+// 'float32' to 'float16' conversion currently.
+export async function buildConstantByNpy(builder, url, targetType = 'float32') {
   const dataTypeMap = new Map([
     ['f2', {type: 'float16', array: Uint16Array}],
     ['f4', {type: 'float32', array: Float32Array}],
@@ -55,12 +105,23 @@ export async function buildConstantByNpy(builder, url) {
     throw new Error(`Data type ${npArray.dataType} is not supported.`);
   }
   const dimensions = npArray.shape;
-  const type = dataTypeMap.get(npArray.dataType).type;
+  let type = dataTypeMap.get(npArray.dataType).type;
   const TypedArrayConstructor = dataTypeMap.get(npArray.dataType).array;
   const dataView = new Uint8Array(npArray.data.buffer);
   const dataView2 = dataView.slice();
-  const typedArray = new TypedArrayConstructor(dataView2.buffer);
-  return builder.constant({dataType: type, type, dimensions}, typedArray);
+  let typedArray = new TypedArrayConstructor(dataView2.buffer);
+  if (type === 'float32' && targetType === 'float16') {
+    const uint16Array = new Uint16Array(typedArray.length);
+    for (let i = 0; i < typedArray.length; ++i) {
+      uint16Array[i] = toHalf(typedArray[i]);
+    }
+    typedArray = uint16Array;
+    type = targetType;
+  } else if (type !== targetType) {
+    throw new Error(`Conversion from ${npArray.dataType} ` +
+        `to ${targetType} is not supported.`);
+  }
+  return builder.constant({dataType: type, dimensions}, typedArray);
 }
 
 // Convert video frame to a canvas element
@@ -314,25 +375,8 @@ export async function setBackend(backend, device) {
     }
     await setPolyfillBackend(device);
   } else if (backend === 'webnn') {
-    // For Electron
-    if (isElectron()) {
-      if (webnnPolyfillElem) {
-        document.body.removeChild(webnnPolyfillElem);
-      }
-      if (!webnnNodeElem) {
-        // Create WebNN node script, node_setup.js is located at
-        // https://github.com/webmachinelearning/webnn-native/tree/main/node/examples/electron/webnn-samples
-        // Specific for running samples with WebNN node addon on Electron.js
-        await loadScript('../../node_setup.js', webnnNodeId);
-      }
-      addAlert(
-          `This sample is running on WebNN-native with <b>${device}</b>` +
-          ` backend.`, 'info');
-    } else {
-      // For Browser
-      if (!await isWebNN()) {
-        addAlert(`WebNN is not supported!`, 'warning');
-      }
+    if (!await isWebNN()) {
+      addAlert(`WebNN is not supported!`, 'warning');
     }
   } else {
     addAlert(`Unknow backend: ${backend}`, 'warning');
@@ -354,24 +398,12 @@ async function loadScript(url, id) {
   });
 }
 
-export function isElectron() {
-  const userAgent = navigator.userAgent.toLowerCase();
-  return userAgent.indexOf(' electron/') > -1;
-}
-
 export async function isWebNN() {
-  // This would be used in
-  // https://github.com/webmachinelearning/webnn-native/tree/main/node/examples/electron/webnn-samples,
-  // where WebNN is enabled by default.
-  if (isElectron()) {
-    return true;
+  if (typeof MLGraphBuilder !== 'undefined') {
+    const context = await navigator.ml.createContext();
+    return !context.tf;
   } else {
-    if (typeof MLGraphBuilder !== 'undefined') {
-      const context = await navigator.ml.createContext();
-      return !context.tf;
-    } else {
-      return false;
-    }
+    return false;
   }
 }
 
@@ -483,4 +515,49 @@ export function permuteData(array, dims, axes) {
   }
 
   return [permutedData, shape];
+}
+
+export function getDefaultLayout(deviceType) {
+  const userAgent = navigator.userAgent;
+  if (userAgent.indexOf('Linux') != -1 || userAgent.indexOf('Android') != -1 ||
+      userAgent.indexOf('CrOS') != -1) {
+    return 'nhwc';
+  } else {
+    // Windows or Mac platform.
+    if (deviceType.indexOf('cpu') != -1) {
+      return 'nhwc';
+    } else if (deviceType.indexOf('gpu') != -1 ||
+               deviceType.indexOf('npu') != -1) {
+      return 'nchw';
+    }
+  }
+}
+
+/**
+ * Display available models based on device type and data type.
+ * @param {Object} modelList list of available models.
+ * @param {Array} modelIds list of model ids.
+ * @param {String} deviceType 'cpu', 'gpu' or 'npu'.
+ * @param {String} dataType 'float32', 'float16', or ''.
+ */
+export function displayAvailableModels(
+    modelList, modelIds, deviceType, dataType) {
+  let models = [];
+  if (dataType == '') {
+    models = models.concat(modelList[deviceType]['float32']);
+    models = models.concat(modelList[deviceType]['float16']);
+  } else {
+    models = models.concat(modelList[deviceType][dataType]);
+  }
+  // Remove duplicate ids.
+  models = [...new Set(models)];
+  // Display available models.
+  // eslint-disable-next-line no-unused-vars
+  for (const modelId of modelIds) {
+    if (models.includes(modelId)) {
+      $(`#${modelId}`).parent().show();
+    } else {
+      $(`#${modelId}`).parent().hide();
+    }
+  }
 }
