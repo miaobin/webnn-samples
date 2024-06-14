@@ -20,6 +20,201 @@ export class RNNoise {
     this.denoiseGruNumDirections = 1;
   }
 
+  buildGruCell_(builder, input, weight, recurrentWeight, hiddenState, hiddenSize, options = {}) {
+    const desc = { dataType: input.dataType(), dimensions: [1] };
+    const constantBuffer0 = new Float32Array([1]).fill(0);
+    const constantBuffer1 = new Float32Array([1]).fill(1);
+    const zero = builder.constant(desc, constantBuffer0);
+    const one = builder.constant(desc, constantBuffer1);
+
+    const inputShape = input.shape();
+    const inputSize = inputShape[1];
+
+    // update gate (z)
+    let z = builder.sigmoid(builder.add(
+      builder.add(
+        (options.bias ? builder.slice(options.bias, [0], [hiddenSize]) : zero),
+        (options.recurrentBias ?
+          builder.slice(options.recurrentBias, [0], [hiddenSize]) :
+          zero)),
+      builder.add(
+        builder.matmul(
+          input,
+          builder.transpose(
+            builder.slice(weight, [0, 0], [hiddenSize, inputSize]))),
+        builder.matmul(
+          hiddenState,
+          builder.transpose(
+            builder.slice(recurrentWeight, [0, 0], [hiddenSize, hiddenSize]))))));
+
+    // reset gate (r)
+    let r = builder.sigmoid(builder.add(
+      builder.add(
+        (options.bias ? builder.slice(options.bias, [hiddenSize], [hiddenSize]) :
+          zero),
+        (options.recurrentBias ?
+          builder.slice(options.recurrentBias, [hiddenSize], [hiddenSize]) :
+          zero)),
+      builder.add(
+        builder.matmul(
+          input,
+          builder.transpose(
+            builder.slice(weight, [hiddenSize, 0], [hiddenSize, inputSize]))),
+        builder.matmul(
+          hiddenState,
+          builder.transpose(builder.slice(
+            recurrentWeight, [hiddenSize, 0], [hiddenSize, hiddenSize]))))));
+
+    // new gate (n)
+    let n;
+    if (options.resetAfter) {
+      n = builder.tanh(builder.add(
+        (options.bias ?
+          builder.slice(options.bias, [2 * hiddenSize], [hiddenSize]) :
+          zero),
+        builder.add(
+          builder.matmul(
+            input,
+            builder.transpose(
+              builder.slice(weight, [2 * hiddenSize, 0], [hiddenSize, inputSize]))),
+          builder.mul(
+            r,
+            builder.add(
+              (options.recurrentBias ?
+                builder.slice(
+                  options.recurrentBias, [2 * hiddenSize], [hiddenSize]) :
+                zero),
+              builder.matmul(
+                hiddenState,
+                builder.transpose(builder.slice(
+                  recurrentWeight,
+                  [2 * hiddenSize, 0],
+                  [hiddenSize, hiddenSize]))))))));
+    } else {
+      n = builder.tanh(builder.add(
+        builder.add(
+          (options.bias ?
+            builder.slice(options.bias, [2 * hiddenSize], [hiddenSize]) :
+            zero),
+          (options.recurrentBias ?
+            builder.slice(options.recurrentBias, [2 * hiddenSize], [hiddenSize]) :
+            zero)),
+        builder.add(
+          builder.matmul(
+            input,
+            builder.transpose(
+              builder.slice(weight, [2 * hiddenSize, 0], [hiddenSize, inputSize]))),
+          builder.matmul(
+            builder.mul(r, hiddenState),
+            builder.transpose(builder.slice(
+              recurrentWeight, [2 * hiddenSize, 0], [hiddenSize, hiddenSize]))))));
+    }
+
+    // compute the new hidden state
+    return builder.add(builder.mul(z, hiddenState), builder.mul(n, builder.sub(one, z)));
+  }
+
+  buildGru_(builder, input, weight, recurrentWeight, steps, hiddenSize, options = {}) {
+
+    function squeeze(builder, op) {
+      let shape = op.shape();
+      let newShape = shape.slice(1);
+      return builder.reshape(op, newShape);
+    }
+
+    const inputShape = input.shape();
+    const batchSize = inputShape[1];
+    const inputSize = inputShape[2];
+
+    const numDirections = (options.direction == 'both' ? 2 : 1);
+    let hiddenState = options.initialHiddenState;
+
+    if (!hiddenState) {
+      const desc = {
+        dataType: 'float32',
+        dimensions: [numDirections, 1, hiddenSize]
+      };
+      const totalSize = numDirections * hiddenSize;
+      hiddenState = builder.constant(desc, new Float32Array(totalSize).fill(0));
+    }
+
+    let sequence = null;
+    let currentWeight = [];
+    let currentRecurrentWeight = [];
+    let currentBias = [];
+    let currentRecurrentBias = [];
+
+    for (let dir = 0; dir < numDirections; ++dir) {
+      currentWeight.push(squeeze(
+        builder,
+        builder.slice(weight, [dir, 0, 0], [1, 3 * hiddenSize, inputSize])));
+      currentRecurrentWeight.push(squeeze(
+        builder,
+        builder.slice(
+          recurrentWeight, [dir, 0, 0], [1, 3 * hiddenSize, hiddenSize])));
+      currentBias.push(
+        options.bias ?
+          (squeeze(
+            builder, builder.slice(options.bias, [dir, 0], [1, 3 * hiddenSize]))) :
+          null);
+      currentRecurrentBias.push(
+        options.recurrentBias ?
+          (squeeze(
+            builder,
+            builder.slice(options.recurrentBias, [dir, 0], [1, 3 * hiddenSize]))) :
+          null);
+    }
+
+    for (let step = 0; step < steps; ++step) {
+      let currentHidden = [];
+      let currentOutput = null;
+
+      for (let dir = 0; dir < numDirections; ++dir) {
+        currentHidden.push(squeeze(
+          builder,
+          builder.slice(hiddenState, [dir, 0, 0], [1, batchSize, hiddenSize])));
+      }
+
+      for (let dir = 0; dir < numDirections; ++dir) {
+        let slice =
+          (dir == 1 || options.direction == 'backward' ? steps - step - 1 : step);
+        let currentInput = squeeze(
+          builder, builder.slice(input, [slice, 0, 0], [1, batchSize, inputSize]));
+
+        let result = builder.reshape(
+          this.buildGruCell_(
+            builder,
+            currentInput,
+            currentWeight[dir],
+            currentRecurrentWeight[dir],
+            currentHidden[dir],
+            hiddenSize,
+            {
+              bias: currentBias[dir],
+              recurrentBias: currentRecurrentBias[dir],
+              resetAfter: options.resetAfter,
+              layout: options.layout,
+              activations: options.activations
+            }),
+          [1, batchSize, hiddenSize]);
+
+        currentOutput =
+          (currentOutput ? builder.concat([currentOutput, result], 0) : result);
+      }
+
+      hiddenState = currentOutput;
+
+      if (options.returnSequence) {
+        currentOutput =
+          builder.reshape(currentOutput, [1, numDirections, batchSize, hiddenSize]);
+        sequence =
+          (sequence ? builder.concat([sequence, currentOutput], 0) : currentOutput);
+      }
+    }
+
+    return (sequence ? [hiddenState, sequence] : [hiddenState]);
+  }
+
   async load(contextOptions) {
     this.context_ = await navigator.ml.createContext(contextOptions);
     this.builder_ = new MLGraphBuilder(this.context_);
@@ -70,7 +265,8 @@ export class RNNoise {
       dataType: 'float32',
       dimensions: [1, this.batchSize_, this.vadGruHiddenSize],
     });
-    const [vadGruYH, vadGruY] = this.builder_.gru(vadGruX,
+    const [vadGruYH, vadGruY] = this.buildGru_(this.builder_, vadGruX,
+    // const [vadGruYH, vadGruY] = this.builder_.gru(vadGruX,
         vadGruW, vadGruR, this.frames_, this.vadGruHiddenSize, {
           bias: vadGruB,
           recurrentBias: vadGruRB,
@@ -97,7 +293,8 @@ export class RNNoise {
       dataType: 'float32',
       dimensions: [1, this.batchSize_, this.noiseGruHiddenSize],
     });
-    const [noiseGruYH, noiseGruY] = this.builder_.gru(noiseGruX,
+    const [noiseGruYH, noiseGruY] = this.buildGru_(this.builder_, noiseGruX,
+    // const [noiseGruYH, noiseGruY] = this.builder_.gru(noiseGruX,
         noiseGruW, noiseGruR, this.frames_, this.noiseGruHiddenSize, {
           bias: noiseGruB,
           recurrentBias: noiseGruRB,
@@ -124,7 +321,8 @@ export class RNNoise {
       dataType: 'float32',
       dimensions: [1, this.batchSize_, this.denoiseGruHiddenSize],
     });
-    const [denoiseGruYH, denoiseGruY] = this.builder_.gru(denoiseGruX,
+    const [denoiseGruYH, denoiseGruY] = this.buildGru_(this.builder_, denoiseGruX,
+    // const [denoiseGruYH, denoiseGruY] = this.builder_.gru(denoiseGruX,
         denoiseGruW, denoiseGruR, this.frames_, this.denoiseGruHiddenSize, {
           bias: denoiseGruB,
           recurrentBias: denoiseGruRB,
